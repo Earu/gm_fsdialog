@@ -66,10 +66,24 @@ unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
         }
     };
 
+    let mut filters: Vec<(String, Vec<String>)> = Vec::new();
     lua.get_field(1, lua_string!("filters"));
     if lua.get_type(-1) == "table" {
-        //while lua.next(-1)
-        //s.split(";").map(|s| s.to_string()).collect()
+        while lua.next(-1) != 0 {
+            let filter_name = lua.get_string(-2);
+            let filter_exts = lua.get_string(-1);
+
+            filters.push(
+                (String::from(filter_name.unwrap_or_default().as_ref()),
+                filter_exts.unwrap_or_default()
+                    .split(';')
+                    .map(|s| s.trim().to_owned())
+                    .collect()
+                )
+            );
+
+            lua.pop();
+        }
     }
 
     DialogOptions {
@@ -109,11 +123,14 @@ unsafe fn poll_dialog_events(_: gmod::lua::State) -> i32 {
 unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
     let lua = lua;
     let opts = get_dialog_opts(lua);
-    let dialog = rfd::AsyncFileDialog::new()
+    let mut dialog = rfd::AsyncFileDialog::new()
         .set_title(opts.title.as_str())
-        .add_filter("lua", &["txt", "lua"])
-        //.add_filter("rust", &["rs", "toml"])
         .set_directory(&opts.path);
+
+    for filter in opts.filter.iter() {
+        let fiters: Vec<&str> = filter.1.iter().map(|s| s.as_str()).collect();
+        dialog = dialog.add_filter(filter.0.as_str(), fiters.as_slice());
+    }
 
     let spawner = POOL.with(|pool| pool.borrow().spawner());
     let res = match opts {
@@ -153,9 +170,8 @@ unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
         },
     };
 
-    match res {
-        Ok(_) => (),
-        Err(e) => lua.error(e.to_string()),
+    if let Err(e) = res {
+        lua.error(e.to_string())
     }
 
     0
@@ -164,6 +180,7 @@ unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
 unsafe fn initialize_polling(lua: gmod::lua::State) {
     lua.get_global(lua_string!("timer"));
     lua.get_field(-1, lua_string!("Create"));
+    lua.push_string("FSDialogPolling");
     lua.push_number(0.1);
     lua.push_integer(0);
     lua.push_function(poll_dialog_events);
