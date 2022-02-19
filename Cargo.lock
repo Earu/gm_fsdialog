@@ -452,6 +452,7 @@ dependencies = [
 name = "gm_fsdialog"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gmod",
  "rfd",
 ]

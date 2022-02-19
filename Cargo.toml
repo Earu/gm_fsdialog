@@ -10,3 +10,4 @@ crate-type = ["cdylib"]
 [dependencies]
 gmod = { version = "*", default-features = false, features = ["gmcl"] }
 rfd = "0.7.0"
+futures = "0.3.21"

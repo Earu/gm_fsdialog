@@ -1,8 +1,11 @@
 #![feature(c_unwind)]
 
-use std::{path::{PathBuf, Component, Path}};
+use std::{path::{PathBuf, Component, Path}, cell::RefCell};
+use futures::{task::{LocalSpawnExt}, future::Either};
+use futures::executor::{LocalPool};
 
-#[macro_use] extern crate gmod;
+#[macro_use]
+extern crate gmod;
 
 static GMOD_PATH_FOLDER: &str = "steamapps/common/GarrysMod";
 fn get_game_dir() -> String {
@@ -28,33 +31,24 @@ struct DialogOptions {
 }
 
 unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
-    if lua.get_type(-1) != "table" { // if nil or anything else return default
-        return DialogOptions {
-            title: "Open File".to_string(),
-            path: PathBuf::new(),
-            filter: Vec::new(),
-            is_folder: false,
-            allow_multiple: false,
-        };
-    }
+    lua.check_table(1);
+    lua.check_function(2);
 
-    lua.get_table(-1);
-    lua.get_field(-1, lua_string!("is_folder"));
+    //lua.from_reference(1);
+
+    lua.get_field(1, lua_string!("is_folder"));
     let is_folder = lua.get_boolean(-1);
 
-    lua.get_table(-2);
-    lua.get_field(-1, lua_string!("allow_multiple"));
+    lua.get_field(1, lua_string!("allow_multiple"));
     let allow_multiple = lua.get_boolean(-1) && !is_folder;
 
-    lua.get_table(-2);
-    lua.get_field(-1, lua_string!("title"));
+    lua.get_field(1, lua_string!("title"));
     let title = match lua.get_string(-1) {
         Some(s) => s.into_owned(),
         None => String::from(if is_folder { "Select Folder" } else { if allow_multiple { "Select Files" } else { "Select File" }}),
     };
 
-    lua.get_table(-2);
-    lua.get_field(-1, lua_string!("path"));
+    lua.get_field(1, lua_string!("path"));
     let input_path = lua.get_string(-1);
     let root_path = get_game_dir();
     let path = {
@@ -72,8 +66,7 @@ unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
         }
     };
 
-    lua.get_table(-2);
-    lua.get_field(-1, lua_string!("filters"));
+    lua.get_field(1, lua_string!("filters"));
     if lua.get_type(-1) == "table" {
         //while lua.next(-1)
         //s.split(";").map(|s| s.to_string()).collect()
@@ -88,43 +81,104 @@ unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
     }
 }
 
+fn is_bad_path(path: &PathBuf) -> bool {
+    let path_str = path.to_str().unwrap();
+    let game_dir = get_game_dir();
+    let game_dir_str = game_dir.as_str();
+    if path_str.starts_with(game_dir_str) && path_str.contains("..") {
+        return false;
+    }
+
+    true
+}
+
+thread_local! {
+    static POOL: RefCell<LocalPool> = RefCell::new(LocalPool::new());
+}
+
 #[lua_function]
-unsafe fn file_dialog_sync(lua: gmod::lua::State) -> i32 {
+unsafe fn poll_dialog_events(_: gmod::lua::State) -> i32 {
+    POOL.with(|pool| {
+        pool.borrow_mut().run_until_stalled();
+    });
+
+    0
+}
+
+#[lua_function]
+unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
+    let lua = lua;
     let opts = get_dialog_opts(lua);
-    let dialog = rfd::FileDialog::new()
+    let dialog = rfd::AsyncFileDialog::new()
         .set_title(opts.title.as_str())
         .add_filter("lua", &["txt", "lua"])
         //.add_filter("rust", &["rs", "toml"])
         .set_directory(&opts.path);
 
-    if opts.allow_multiple {
-        match dialog.pick_files() {
-            Some(files) => {
-                lua.new_table();
-                for (i, file) in files.iter().enumerate() {
-                    lua.push_string(file.to_str().unwrap());
-                    lua.push_integer(i as isize);
+    let spawner = POOL.with(|pool| pool.borrow().spawner());
+    let res = match opts {
+        opts if opts.allow_multiple => {
+            let task = dialog.pick_files();
+            spawner.spawn_local(async move {
+                let res = task.await;
+                match res {
+                    Some (handles) => {
+
+                    },
+                    None => (),
                 }
-            },
-            None => lua.push_boolean(false),
-        }
-    } else {
-        let res = if opts.is_folder { dialog.pick_folder() } else { dialog.pick_file() };
-        match res {
-            Some(path) => lua.push_string(path.to_str().unwrap()),
-            None => lua.push_boolean(false),
-        }
+            })
+        },
+        _ => {
+            let task = if opts.is_folder {
+                Either::Left(dialog.pick_folder())
+            } else {
+                Either::Right(dialog.pick_file())
+            };
+
+            spawner.spawn_local(async move {
+                let res = task.await;
+                match res {
+                    Some (handle) => {
+                        let path = handle.path().to_path_buf();
+                        if is_bad_path(&path) {
+                            lua.push_boolean(false)
+                        } else {
+                            lua.push_string(path.to_str().unwrap());
+                        }
+                    },
+                    None => lua.push_boolean(false),
+                }
+            })
+        },
+    };
+
+    match res {
+        Ok(_) => (),
+        Err(e) => lua.error(e.to_string()),
     }
 
-    1
+    0
+}
+
+unsafe fn initialize_polling(lua: gmod::lua::State) {
+    lua.get_global(lua_string!("timer"));
+    lua.get_field(-1, lua_string!("Create"));
+    lua.push_number(0.1);
+    lua.push_integer(0);
+    lua.push_function(poll_dialog_events);
+    lua.pcall(4, 0, 0);
+    lua.pop_n(2);
 }
 
 #[gmod13_open]
 unsafe fn gmod13_open(lua: gmod::lua::State) -> i32 {
     lua.get_global(lua_string!("file"));
-
-    lua.push_function(file_dialog_sync);
+    lua.push_function(fs_dialog);
     lua.set_field(-2, lua_string!("OpenDialog"));
+    lua.pop_n(2);
+
+    initialize_polling(lua);
 
     0
 }
