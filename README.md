@@ -1,5 +1,5 @@
 # gm_fsdialog
-Open your operating system's file browser from Garry's Mod.
+**Open your operating system's file browser from Garry's Mod.**
 
 ## Examples
 Opening a file:
@@ -28,7 +28,7 @@ require("fsdialog")
 file.OpenDialog({
 	path = "data/pac3/",
 	filters = {
-		["pac3"] = ".txt"
+		["pac3"] = "txt"
 	},
 	on_completed = function(paths)
 		print("User selected the following files:")
