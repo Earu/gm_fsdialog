@@ -28,13 +28,11 @@ struct DialogOptions {
     filter: Vec<(String, Vec<String>)>,
     is_folder: bool,
     allow_multiple: bool, // only works with files
+    on_completed: Option<i32>,
 }
 
 unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
     lua.check_table(1);
-    lua.check_function(2);
-
-    //lua.from_reference(1);
 
     lua.get_field(1, lua_string!("is_folder"));
     let is_folder = lua.get_boolean(-1);
@@ -66,6 +64,15 @@ unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
         }
     };
 
+    let on_completed = {
+        lua.get_field(1, lua_string!("on_completed"));
+        if lua.is_function(-1) {
+            Some(lua.reference())
+        } else {
+            None
+        }
+    };
+
     let mut filters: Vec<(String, Vec<String>)> = Vec::new();
     lua.get_field(1, lua_string!("filters"));
     if lua.get_type(-1) == "table" {
@@ -92,6 +99,7 @@ unsafe fn get_dialog_opts(lua: gmod::lua::State) -> DialogOptions {
         filter: Vec::new(),
         is_folder,
         allow_multiple,
+        on_completed,
     }
 }
 
@@ -123,6 +131,11 @@ unsafe fn poll_dialog_events(_: gmod::lua::State) -> i32 {
 unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
     let lua = lua;
     let opts = get_dialog_opts(lua);
+    if opts.on_completed.is_none() {
+        lua.error("on_completed callback is required");
+    }
+
+    let on_completed = opts.on_completed.unwrap();
     let mut dialog = rfd::AsyncFileDialog::new()
         .set_title(opts.title.as_str())
         .set_directory(&opts.path);
@@ -138,12 +151,23 @@ unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
             let task = dialog.pick_files();
             spawner.spawn_local(async move {
                 let res = task.await;
+                lua.from_reference(on_completed);
+                lua.new_table();
                 match res {
                     Some (handles) => {
-
+                        for (i, handle) in handles.iter().enumerate() {
+                            let path = handle.path().to_path_buf();
+                            if !is_bad_path(&path) {
+                                lua.push_string(path.to_str().unwrap());
+                                lua.push_integer(i as isize);
+                                lua.set_table(-3);
+                            }
+                        }
                     },
                     None => (),
                 }
+                lua.call(1, 0);
+                lua.dereference(on_completed);
             })
         },
         _ => {
@@ -155,23 +179,36 @@ unsafe fn fs_dialog(lua: gmod::lua::State) -> i32 {
 
             spawner.spawn_local(async move {
                 let res = task.await;
+                lua.from_reference(on_completed);
                 match res {
                     Some (handle) => {
                         let path = handle.path().to_path_buf();
                         if is_bad_path(&path) {
-                            lua.push_boolean(false)
+                            lua.push_boolean(false);
+                            lua.push_string("Path out of game directory");
+                            lua.call(2, 0);
                         } else {
                             lua.push_string(path.to_str().unwrap());
+                            lua.call(1, 0);
                         }
                     },
-                    None => lua.push_boolean(false),
+                    None => {
+                        lua.push_boolean(false);
+                        lua.push_string("Invalid path");
+                        lua.call(2, 0);
+                    },
                 }
+                lua.dereference(on_completed);
             })
         },
     };
 
     if let Err(e) = res {
-        lua.error(e.to_string())
+        lua.from_reference(on_completed);
+        lua.push_boolean(false);
+        lua.push_string(e.to_string().as_str());
+        lua.call(2, 0);
+        lua.dereference(on_completed);
     }
 
     0
