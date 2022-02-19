@@ -55,6 +55,9 @@ file.OpenDialog({
 
 Saving a file:
 ```lua
+require("fsdialog")
+
+file.OpenDialog({
 	path = "lua",
 	is_save = true,
 	default_save_name = "my_script.lua",
